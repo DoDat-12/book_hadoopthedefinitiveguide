@@ -100,3 +100,87 @@ All the reduce function has to do is iterate through the list and pick up the ma
 
 A `Job` object forms the specification of the job and gives you control over how the job is run. When we run this job on
 a Hadoop cluster, we will package the code into a JAR file (which Hadoop will distribute around the cluster)
+
+## Scaling Out
+
+To scale out, we need to store the data in a distributed filesystem (typically HDFS). This allows Hadoop to move the
+MapReduce computation to each machine hosting a part of the data, using Hadoop's resource management system, call YARN.
+
+### Data Flow
+
+A MapReduce job is a unit of work that the client wants to be performed: it consists of the input data, the MapReduce
+program, and configuration information. Hadoop runs the job by dividing it into _tasks_, of which there are two types:
+_map tasks_ and _reduce tasks_. The tasks are scheduled using YARN and run on nodes in the cluster. If a task fails, it
+will be automatically rescheduled to run on a different node.
+
+Hadoop divides the input to a MapReduce job into fixed-size pieces called _input splits_ (or _splits_). Hadoop creates
+one map task for each split, which runs the user-defined map function for each _record_ in the split.
+
+For most jobs, a good split size tends to be the size of an HDFS block, which is 128 MB by default (this can be changed
+for the cluster or specified when eah file is created).
+
+_The data locality_: Hadoop does it best to run the map task on a node where the input data resides in HDFS (cuz it
+doesn't use valuable cluster bandwidth). Sometimes, however, all the nodes hosting the HDFS block replicas for a map
+task's input split are running other map tasks, so the job scheduler will look for a free map slot on a node in the same
+rack as one of the blocks.
+
+Map tasks write their output to the local disk, not to HDFS because map output is intermediate output: it's processed by
+reduce tasks to produce the final output, and once the job is complete, the map output can be thrown away.
+
+> If the node running the map task fails before the map output has been consumed by the reduce task, then Hadoop will
+> automatically rerun the map task on another node to re-create the map output
+
+![rack map task.png](rack%20map%20task.png)
+Data local (a), rack-local (b), off-rack (c)
+
+Reduce tasks don’t have the advantage of data locality; the input to a single reduce task is normally the output from
+all mappers. The sorted map outputs have to be transferred across the network to the node where the reduce task is
+running, where they are merged and then passed to the user-defined reduce function.
+
+> For each HDFS block of the reduce output, the first replica is stored on the local node, with other replicas being
+> stored on off-rack nodes for reliability
+
+![dataflow single reduce task.png](dataflow%20single%20reduce%20task.png)
+
+When there are multiple reducers, the map tasks partition their output, each creating one partition for each reduce task
+There can be many keys (and their associated values) in each partition, but the records for any given key are all in a
+single partition. The partitioning can be controlled by a user-defined partitioning function, but normally the default
+partitioner—which buckets keys using a hash function—works very well.
+
+![dataflow multiple reduce task.png](dataflow%20multiple%20reduce%20task.png)
+
+### Combiner Functions
+
+Many MapReduce jobs are limited by the bandwidth available on the cluster, so it pays to minimize the data transferred
+between map and reduce tasks. The _combiner function_ is an optimization, runs on the map output to form the input to
+the reduce function.
+
+Suppose that for the maximum temperature example, readings for the year 1950 were processed by two maps (because they
+were in different splits). Imagine the first map produced the output:
+
+    (1950, 0)
+    (1950, 20)
+    (1950, 10)
+
+and the second produced:
+
+    (1950, 25)
+    (1950, 15)
+
+The reduce function would be called with a list of all the values:
+
+    (1950, [0, 20, 10, 25, 15])
+
+with output:
+
+    (1950, 25)
+
+since 25 is the maximum value in the list. We could use a combiner function that, just like the reduce function, finds
+the maximum temperature for each map output. The reduce function would then be called with:
+
+    (1950, [20, 25])
+
+    max(0, 20, 10, 25, 15) = max(max(0, 20, 10), max(25, 15)) = max(20, 25) = 25
+
+> The combiner function doesn’t replace the reduce function. But it can help cut down the amount of data shuffled
+> between the mappers and the reducers
