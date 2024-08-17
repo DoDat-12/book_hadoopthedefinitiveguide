@@ -358,3 +358,88 @@ All the elements of an `ArrayWritable` or a `TwoDArrayWritable` must be instance
 
 ## File-Based Data Structures
 
+### SequenceFile
+
+Hadoop’s `SequenceFile` provides a persistent data structure for binary key-value pairs. To use it as a logfile format,
+you would choose a key, such as timestamp represented by a `LongWritable`, and the value would be a `Writable` that
+represents the quantity being logged.
+
+**Writing a SequenceFile**
+
+To create a `SequenceFile`, use one of its `createWriter()` static methods, which return a `SequenceFile` instance. The
+keys and values stored in a `SequenceFile` do not necessarily need to be `Writables`. Any types that can be serialized
+and deserialized by a `Serialization` may be used.
+
+Once you have a `SequenceFile.Writer`, you then write key-value pairs using the `append()` method. When you’ve finished,
+you call the `close()` method.
+
+    writer = SequenceFile.createWriter(fs, conf, path, key.getClass(), value.getClass());
+
+See SequenceFileWriteDemo.java
+
+> The `writer.getLength()` method discovers the current position in the file
+
+**Reading a SequenceFile**
+
+Reading sequence files from beginning to end is a matter of creating an instance of `SequenceFile.Reader` and iterating
+over records by repeatedly invoking one of the `next()` methods.
+
+    public boolean next(Writable key, Writable Value);
+    // true if a key-value pair was read and false if the end of the file has been reached
+
+Non-Writable serialization frameworks (such as Apache Thrift)
+
+    public Object next(Object key) throws IOException
+    public Object getCurrentValue(Object val) throws IOException
+
+If the `next()` method returns a non-null object, a key-value pair was read from the stream, and the value can be
+retrieved using the `getCurrentValue()` method. Otherwise, if `next()` returns null, the end of the file has been
+reached.
+
+Seek to a given position in a sequence file:
+
+- `seek()` method, which positions the reader at the given point in the file
+
+
+    // % hadoop SequenceFileReadDemo numbers.seq
+    // [359] 95 One, two, buckle my shoe
+    reader.seek(359);
+    assertThat(reader.next(key, value), is(true)); // not null
+    assertThat(((IntWritable) key).get(), is(95));
+
+> `reader.next(key, value);` fails with `IOException` if the position in the file is not at a record boundary
+
+- `sync(long position)` method, positions the reader at the next sync point after the `position`. If there are no sync
+  point in the file after this position, then the reader will be positioned at the end of the file. Thus, we can call
+  `sync()` with any position in the stream - not necessarily a record boundary - and the reader will reestablish itself
+  at the next sync point so reading can continue
+
+
+    // [2021*] 59 Three, four, shut the door
+    reader.sync(360);
+    assertThat(reader.getPosition(), is(2021L));
+    assertThat(reader.next(key, value), is(true);
+    assertThat(((IntWritable) key).get(), is(59));    
+    
+**Sorting and Merging SequenceFile**
+
+    % hadoop jar \
+    $HADOOP_HOME/share/hadoop/mapreduce/hadoop-mapreduce-examples-*.jar \
+    sort -r 1 \
+    -inFormat org.apache.hadoop.mapreduce.lib.input.SequenceFileInputFormat \
+    -outFormat org.apache.hadoop.mapreduce.lib.output.SequenceFileOutputFormat \
+    -outKey org.apache.hadoop.io.IntWritable \
+    -outValue org.apache.hadoop.io.Text \
+    numbers.seq sorted
+    % hadoop fs -text sorted/part-r-00000 | head
+
+**The SequenceFile format**: Page 133
+
+**Row-oriented versus column-oriented storage**
+
+![row versus col oriented storage.png](row%20versus%20col%20oriented%20storage.png)
+
+The first column-oriented file format in Hadoop was Hive’s RCFile, short for Record Columnar File. It has since been 
+superseded by Hive’s ORCFile (Optimized Record Columnar File), and Parquet (covered in Chapter 13). Parquet is a 
+general-purpose columnoriented file format based on Google’s Dremel, and has wide support across Hadoop components. 
+Avro also has a column-oriented format called _Trevni_
